@@ -292,11 +292,11 @@ class PipelineOrchestrator:
                 dependencies=["marketo-extractor"]
             ),
             
-            # KPI Consumer
+            # Enhanced KPI Consumer
             ServiceConfig(
-                name="kpi-consumer",
+                name="enhanced-kpi-consumer",
                 command="python",
-                args=["-m", "etl.load.kpi_consumer"],
+                args=["-m", "etl.load.enhanced_kpi_consumer"],
                 working_dir=".",
                 health_check_url="http://localhost:8004/health",
                 restart_policy="always",
@@ -313,7 +313,7 @@ class PipelineOrchestrator:
                 health_check_url="http://localhost:8005/health",
                 restart_policy="always",
                 priority=30,
-                dependencies=["kpi-consumer"]
+                dependencies=["enhanced-kpi-consumer"]
             ),
             
             # Archive Worker
