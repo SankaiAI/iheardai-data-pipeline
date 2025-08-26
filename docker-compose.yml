@@ -1,0 +1,293 @@
+version: '3.8'
+
+services:
+  # Marketo Data Extractor
+  marketo-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.extractor
+    environment:
+      - PYTHONPATH=/app
+      - MARKETO_BASE_URL=${MARKETO_BASE_URL}
+      - MARKETO_CLIENT_ID=${MARKETO_CLIENT_ID}
+      - MARKETO_CLIENT_SECRET=${MARKETO_CLIENT_SECRET}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/data
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.extract.marketo_extractor"]
+    restart: on-failure
+    depends_on:
+      - kafka-setup
+    networks:
+      - data-pipeline
+
+  # Frontend Events Extractor
+  frontend-events-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.extractor
+    environment:
+      - PYTHONPATH=/app
+      - FRONTEND_API_URL=${FRONTEND_API_URL}
+      - FRONTEND_WEBHOOK_SECRET=${FRONTEND_WEBHOOK_SECRET}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.extract.frontend_events_extractor", "--mode", "hybrid"]
+    restart: always
+    depends_on:
+      - marketo-extractor
+    ports:
+      - "8002:8002"
+    networks:
+      - data-pipeline
+
+  # Text Agent Events Extractor
+  text-agent-events-extractor:
+    build:
+      context: .
+      dockerfile: Dockerfile.extractor
+    environment:
+      - PYTHONPATH=/app
+      - TEXT_AGENT_API_URL=${TEXT_AGENT_API_URL}
+      - TEXT_AGENT_API_KEY=${TEXT_AGENT_API_KEY}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.extract.text_agent_events_extractor", "--mode", "hybrid"]
+    restart: always
+    depends_on:
+      - marketo-extractor
+    ports:
+      - "8003:8003"
+    networks:
+      - data-pipeline
+
+  # KPI Consumer
+  kpi-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    environment:
+      - PYTHONPATH=/app
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.load.kpi_consumer"]
+    restart: always
+    depends_on:
+      - frontend-events-extractor
+      - text-agent-events-extractor
+    ports:
+      - "8004:8004"
+    networks:
+      - data-pipeline
+
+  # Billing Consumer
+  billing-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    environment:
+      - PYTHONPATH=/app
+      - POSTGRES_HOST=${POSTGRES_HOST}
+      - POSTGRES_PORT=${POSTGRES_PORT}
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.load.billing_consumer"]
+    restart: always
+    depends_on:
+      - kpi-consumer
+    ports:
+      - "8005:8005"
+    networks:
+      - data-pipeline
+
+  # Archive Worker
+  archive-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    environment:
+      - PYTHONPATH=/app
+      - SPACES_ENDPOINT=${SPACES_ENDPOINT}
+      - SPACES_KEY=${SPACES_KEY}
+      - SPACES_SECRET=${SPACES_SECRET}
+      - SPACES_BUCKET=${SPACES_BUCKET}
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/data
+      - ./logs:/var/log
+    command: ["python", "-m", "etl.load.archive_worker"]
+    restart: always
+    depends_on:
+      - billing-consumer
+    ports:
+      - "8006:8006"
+    networks:
+      - data-pipeline
+
+  # Pipeline Orchestrator
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["python", "-m", "pipelines.orchestrator"]
+    restart: always
+    ports:
+      - "8000:8000"
+    networks:
+      - data-pipeline
+    depends_on:
+      - kafka-setup
+
+  # Kafka Setup (Topic Creation)
+  kafka-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile.setup
+    environment:
+      - KAFKA_USER=${KAFKA_USER}
+      - KAFKA_PASSWORD=${KAFKA_PASSWORD}
+    volumes:
+      - ./config:/app/config:ro
+      - ./scripts:/app/scripts:ro
+    command: ["python", "-m", "scripts.setup_kafka_topics"]
+    restart: "no"
+    networks:
+      - data-pipeline
+
+  # Monitoring Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-storage:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    networks:
+      - data-pipeline
+    restart: always
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=7d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-storage:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - data-pipeline
+    restart: always
+
+  # Log aggregation
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-storage:/tmp/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - data-pipeline
+    restart: always
+
+  # Log collection
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - ./logs:/var/log/pipeline:ro
+      - ./monitoring/promtail/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - data-pipeline
+    restart: always
+
+  # Redis for development/testing
+  redis-dev:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --requirepass devpassword
+    volumes:
+      - redis-dev-data:/data
+    networks:
+      - data-pipeline
+    profiles:
+      - dev
+
+  # PostgreSQL for development/testing  
+  postgres-dev:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=iheardai_analytics
+      - POSTGRES_USER=pipeline_user
+      - POSTGRES_PASSWORD=devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-dev-data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - data-pipeline
+    profiles:
+      - dev
+
+volumes:
+  grafana-storage:
+  prometheus-storage:
+  loki-storage:
+  redis-dev-data:
+  postgres-dev-data:
+
+networks:
+  data-pipeline:
+    driver: bridge

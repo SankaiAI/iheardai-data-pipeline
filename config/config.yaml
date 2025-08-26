@@ -1,0 +1,263 @@
+# Data Pipeline Configuration
+# Environment: development/staging/production
+
+environment: development
+
+# DigitalOcean Infrastructure
+digitalocean:
+  region: nyc3
+  vpc_name: iheardai-data-vpc
+  
+# Kafka Configuration
+kafka:
+  brokers: 
+    - broker-1.iheardai.internal:9092
+    - broker-2.iheardai.internal:9092
+    - broker-3.iheardai.internal:9092
+  security_protocol: SASL_SSL
+  sasl_mechanism: PLAIN
+  sasl_username: ${KAFKA_USER}
+  sasl_password: ${KAFKA_PASSWORD}
+  ssl_ca_location: /etc/ssl/certs/ca-certificates.crt
+  
+  # Topic Configuration
+  topics:
+    text_agent_turn_completed:
+      name: text.agent.turn.completed
+      partitions: 6
+      replication_factor: 3
+      config:
+        retention.ms: 2592000000  # 30 days
+        cleanup.policy: delete
+        compression.type: snappy
+        
+    frontend_user_interaction:
+      name: frontend.user.interaction
+      partitions: 8
+      replication_factor: 3
+      config:
+        retention.ms: 2592000000  # 30 days
+        cleanup.policy: delete
+        compression.type: snappy
+        
+    agent_tool_invoked:
+      name: agent.tool.invoked
+      partitions: 3
+      replication_factor: 3
+      config:
+        retention.ms: 2592000000  # 30 days
+        cleanup.policy: delete
+        compression.type: snappy
+        
+    billing_usage_metered:
+      name: billing.usage.metered
+      partitions: 3
+      replication_factor: 3
+      config:
+        retention.ms: 2592000000  # 30 days
+        cleanup.policy: delete
+        compression.type: snappy
+        
+    marketo_leads_delta:
+      name: marketo.leads.delta
+      partitions: 3
+      replication_factor: 3
+      config:
+        retention.ms: 604800000   # 7 days
+        cleanup.policy: delete
+        compression.type: snappy
+
+  # Producer Settings
+  producer:
+    acks: all
+    retries: 2147483647
+    retry_backoff_ms: 100
+    max_in_flight_requests_per_connection: 5
+    enable_idempotence: true
+    compression_type: snappy
+    batch_size: 16384
+    linger_ms: 5
+    buffer_memory: 33554432
+    
+  # Consumer Settings  
+  consumer:
+    auto_offset_reset: earliest
+    enable_auto_commit: false
+    max_poll_records: 500
+    session_timeout_ms: 30000
+    heartbeat_interval_ms: 3000
+    fetch_min_bytes: 1
+    fetch_max_wait_ms: 500
+
+# PostgreSQL Configuration
+postgresql:
+  host: ${POSTGRES_HOST}
+  port: ${POSTGRES_PORT}
+  database: ${POSTGRES_DB}
+  username: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+  sslmode: require
+  
+  # Connection Pool Settings
+  pool:
+    min_size: 5
+    max_size: 20
+    max_overflow: 30
+    pool_timeout: 30
+    pool_recycle: 3600
+    
+  # Table Configuration
+  tables:
+    agent_turns:
+      partition_by: range(ts_ms)
+      partition_interval: monthly
+      indexes:
+        - columns: [user_id, ts_ms]
+        - columns: [session_id, turn_id]
+          unique: true
+          
+    session_kpis:
+      indexes:
+        - columns: [updated_at]
+        - columns: [user_id, started_at]
+        
+    billing_usage:
+      partition_by: range(bucket_min)
+      partition_interval: monthly
+      indexes:
+        - columns: [account_id, bucket_min]
+          unique: true
+
+# Redis Configuration
+redis:
+  host: ${REDIS_HOST}
+  port: ${REDIS_PORT}
+  password: ${REDIS_PASSWORD}
+  ssl: true
+  db: 0
+  
+  # Connection Pool
+  max_connections: 50
+  socket_connect_timeout: 5
+  socket_timeout: 5
+  retry_on_timeout: true
+  health_check_interval: 30
+  
+  # Session State Configuration
+  session:
+    key_pattern: "session:{session_id}:state"
+    ttl: 3600  # 1 hour
+    metrics_key_pattern: "session:{session_id}:metrics"
+    metrics_ttl: 86400  # 24 hours
+
+# DigitalOcean Spaces Configuration
+spaces:
+  endpoint: https://nyc3.digitaloceanspaces.com
+  region: nyc3
+  bucket: iheardai-events-archive
+  access_key: ${SPACES_ACCESS_KEY}
+  secret_key: ${SPACES_SECRET_KEY}
+  
+  # Archive Settings
+  archive:
+    format: parquet  # parquet or ndjson
+    partition_by: date  # date or hour
+    partition_pattern: "dt=%Y-%m-%d/topic=%s/"
+    compression: snappy
+    batch_size: 10000
+    flush_interval: 3600  # 1 hour in seconds
+    
+  # Retention Policy
+  lifecycle:
+    transition_to_ia: 30    # days
+    transition_to_archive: 90   # days
+    expiration: 2555        # 7 years in days
+
+# Marketo Configuration
+marketo:
+  base_url: ${MARKETO_BASE_URL}
+  client_id: ${MARKETO_CLIENT_ID}
+  client_secret: ${MARKETO_CLIENT_SECRET}
+  
+  # Extraction Settings
+  extraction:
+    batch_size: 300
+    date_field: updatedAt
+    checkpoint_file: /data/marketo_checkpoint.json
+    fields:
+      - id
+      - email
+      - firstName
+      - lastName
+      - createdAt
+      - updatedAt
+      - leadSource
+      - originalSourceType
+      
+# Processing Configuration
+processing:
+  # KPI Consumer Settings
+  kpi_consumer:
+    consumer_group: kpi-consumer-group
+    batch_size: 100
+    commit_interval: 5000  # ms
+    max_retries: 3
+    retry_delay: 1000      # ms
+    
+  # Billing Consumer Settings  
+  billing_consumer:
+    consumer_group: billing-consumer-group
+    window_size: 60        # seconds (1 minute buckets)
+    batch_size: 50
+    commit_interval: 10000 # ms
+    
+  # Archive Worker Settings
+  archive_worker:
+    consumer_group: archive-worker-group
+    batch_size: 1000
+    flush_threshold: 10000
+    flush_interval: 3600   # seconds
+    temp_dir: /tmp/archive
+    
+# Monitoring Configuration
+monitoring:
+  metrics:
+    prometheus_port: 9090
+    pushgateway_url: ${PUSHGATEWAY_URL}
+    
+  alerts:
+    consumer_lag_threshold: 1000
+    error_rate_threshold: 0.05    # 5%
+    response_time_threshold: 5000 # ms
+    
+  logging:
+    level: info
+    format: json
+    file: /var/log/data-pipeline.log
+    max_size: 100MB
+    max_files: 5
+
+# Security Configuration
+security:
+  encryption:
+    enabled: true
+    key_rotation_days: 90
+    
+  pii_redaction:
+    enabled: true
+    fields:
+      - email
+      - phone
+      - credit_card
+      - ssn
+      
+  access_control:
+    jwt_secret: ${JWT_SECRET}
+    token_expiry: 3600     # seconds
+    
+# Feature Flags
+features:
+  enable_deduplication: true
+  enable_schema_validation: true
+  enable_metrics_collection: true
+  enable_audit_logging: true
